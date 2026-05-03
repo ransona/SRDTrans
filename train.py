@@ -65,7 +65,7 @@ if not os.path.exists(opt.output_path):
 current_time = opt.datasets_folder+'_'+datetime.datetime.now().strftime("%Y%m%d%H%M")
 
 output_path = os.path.join(opt.output_path, current_time)
-pth_path = os.path.join('pth', current_time)
+pth_path = os.path.join(opt.pth_path, current_time)
 print("ckp is saved in {}".format(pth_path))
 if not os.path.exists(pth_path): 
     os.mkdir(pth_path)

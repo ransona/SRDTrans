@@ -9,6 +9,51 @@ from torch.utils.data import Dataset
 from skimage import io
 
 
+def list_supported_stack_files(im_folder):
+    """Return denoiser input stacks, preferring TIFFs but allowing Suite2p binaries."""
+    filenames = sorted(
+        [
+            f for f in os.listdir(im_folder)
+            if os.path.isfile(os.path.join(im_folder, f))
+        ]
+    )
+    tif_files = sorted([f for f in filenames if f.lower().endswith('.tif')])
+    if tif_files:
+        return tif_files
+    return sorted([f for f in filenames if f in {'data.bin', 'data_chan2.bin'}])
+
+
+def load_stack_file(im_dir):
+    """Load either a TIFF stack or a Suite2p registered binary stack."""
+    if im_dir.lower().endswith('.tif'):
+        with tiff.TiffFile(im_dir) as tif:
+            return np.stack([page.asarray() for page in tif.pages])
+
+    if os.path.basename(im_dir) not in {'data.bin', 'data_chan2.bin'}:
+        raise ValueError(f'Unsupported stack file: {im_dir}')
+
+    plane_dir = os.path.dirname(im_dir)
+    ops_path = os.path.join(plane_dir, 'ops.npy')
+    if not os.path.exists(ops_path):
+        raise FileNotFoundError(f'Missing ops.npy next to Suite2p binary: {ops_path}')
+
+    ops = np.load(ops_path, allow_pickle=True).item()
+    ly = int(ops.get('Ly', ops.get('meanImg', np.empty((0, 0))).shape[0]))
+    lx = int(ops.get('Lx', ops.get('meanImg', np.empty((0, 0))).shape[1]))
+    if ly <= 0 or lx <= 0:
+        raise ValueError(f'Could not determine frame size from {ops_path}')
+
+    mm = np.memmap(im_dir, dtype=np.int16, mode='r')
+    pixels_per_frame = ly * lx
+    if mm.size % pixels_per_frame != 0:
+        raise ValueError(
+            f'Binary size in {im_dir} is not divisible by frame size {ly}x{lx}'
+        )
+
+    n_frames = mm.size // pixels_per_frame
+    return np.asarray(mm.reshape(n_frames, ly, lx))
+
+
 def random_transform(input):
     p_trans = random.randrange(8)  # (64, 128, 128)
     if p_trans == 0:  # no transformation
@@ -203,14 +248,15 @@ def train_preprocess_lessMemoryMulStacks(args):
     ind = 0
     print('\033[1;31mImage list for training -----> \033[0m')
     print('All files are in -----> ', im_folder)
-    stack_num = len(list(os.walk(im_folder, topdown=False))[-1][-1])
+    stack_files = list_supported_stack_files(im_folder)
+    stack_num = len(stack_files)
     print('Total stack number -----> ', stack_num)
 
     print('Reading files...') 
     print('\033[1;33mPlease check the shape of these image stacks, since some hyperstacks have unusual shapes. In that case, you just need to re-store these images by ImageJ. \033[0m') 
-    for im_name in list(os.walk(im_folder, topdown=False))[-1][-1]:
+    for im_name in stack_files:
         im_dir = os.path.join(im_folder, im_name)
-        noise_im = tiff.imread(im_dir)
+        noise_im = load_stack_file(im_dir)
         print(im_name, ' -----> the shape is', noise_im.shape)
         if noise_im.shape[0]>args.select_img_num:
             noise_im = noise_im[0:args.select_img_num,:,:]
@@ -248,7 +294,8 @@ def train_preprocess_lessMemoryMulStacks(args):
                     single_coordinate['init_s'] = init_s
                     single_coordinate['end_s'] = end_s
                     # noise_patch1 = noise_im[init_s:end_s,init_h:end_h,init_w:end_w]
-                    patch_name = args.datasets_folder+'_'+im_name.replace('.tif','')+'_x'+str(x)+'_y'+str(y)+'_z'+str(z)
+                    patch_stem = os.path.splitext(im_name)[0]
+                    patch_name = args.datasets_folder+'_'+patch_stem+'_x'+str(x)+'_y'+str(y)+'_z'+str(z)
                     # train_raw.append(noise_patch1.transpose(1,2,0))
                     name_list.append(patch_name)
                     # print(' single_coordinate -----> ',single_coordinate)
@@ -332,23 +379,26 @@ def test_preprocess_lessMemoryNoTail_chooseOne (args, N):
     name_list = []
     # train_raw = []
     coordinate_list={}
-    img_list = list(os.walk(im_folder, topdown=False))[-1][-1]
-    img_list.sort()
+    img_list = list_supported_stack_files(im_folder)
     # print(img_list)
 
     im_name = img_list[N]
 
     im_dir = os.path.join(im_folder, im_name)
-    noise_im = tiff.imread(im_dir)
+    noise_im = load_stack_file(im_dir)
     
     input_data_type = noise_im.dtype
-    img_mean = noise_im.mean()
+    
     
     if noise_im.shape[0]>args.test_datasize:
         noise_im = noise_im[0:args.test_datasize,:,:]
     noise_im = noise_im.astype(np.float32)/args.scale_factor
+    # to deal with tifs with negative values
+    noise_im = noise_im-noise_im.min()
+    img_mean = noise_im.mean()
     noise_im = noise_im-img_mean
-    # noise_im = (noise_im-noise_im.min()).astype(np.float32)/args.scale_factor
+
+    # noise_im = ((noise_im-noise_im.min()).astype(np.float32)/args.scale_factor)
 
     whole_x = noise_im.shape[2]
     whole_y = noise_im.shape[1]

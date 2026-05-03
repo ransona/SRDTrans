@@ -1,0 +1,7 @@
+copy_data.py
+__pycache__/
+SRDTrans/**/__pycache__/
+Assessment/
+datasets/
+pth/
+results/

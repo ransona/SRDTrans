@@ -8,6 +8,7 @@ import datetime
 import numpy as np
 import math
 import tifffile as tiff
+import sys
 
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
@@ -16,15 +17,23 @@ from skimage import io
 from tqdm import tqdm
 
 from SRDTrans import SRDTrans
-from data_process import test_preprocess_lessMemoryNoTail_chooseOne, testset, singlebatch_test_save, multibatch_test_save
+from data_process import (
+    list_supported_stack_files,
+    multibatch_test_save,
+    singlebatch_test_save,
+    test_preprocess_lessMemoryNoTail_chooseOne,
+    testset,
+)
 from utils import save_yaml_train
 from sampling import *
+
+print('SRDTrans denoiser launched...')
 
 #############################################################################################################################################
 parser = argparse.ArgumentParser()
 parser.add_argument('--GPU', type=str, default='0,1', help="the index of GPU used for computation (e.g., '0', '0,1', '0,1,2')")
 
-parser.add_argument('--denoise_model', type=str, default=None, help='A folder containing models to be tested')
+parser.add_argument('--denoise_model', type=str, default='03hz', help='A folder containing models to be tested')
 parser.add_argument('--datasets_folder', type=str, default='train', help="A folder containing all *.tif files for training")
 
 parser.add_argument('--patch_x', type=int, default=128, help="patch size in x and y")
@@ -34,10 +43,21 @@ parser.add_argument('--overlap_factor', type=float, default=0.5, help="the overl
 parser.add_argument('--datasets_path', type=str, default='./datasets', help="dataset root path")
 parser.add_argument('--pth_path', type=str, default='./pth', help="the root path to save models")
 parser.add_argument('--output_path', type=str, default='./results', help="output directory")
+parser.add_argument('--output_format', type=str, default='tif', choices=['tif', 'bin'], help="whether to save denoised outputs as TIFF stacks or Suite2p-style binaries")
 
 parser.add_argument('--test_datasize', type=int, default=1000000, help='how many slices to be tested')
 parser.add_argument('--scale_factor', type=int, default=1, help='the factor for image intensity scaling')
 opt = parser.parse_args()
+
+# # For debugging
+# print('WARNING: USING FIXED PARAMETERS FOR TESTING')
+# opt.datasets_path = '/home/adamranson/data/Repository/ESPM115/2024-11-11_01_ESPM115/denoised_tifs_single_plane/suite2p/plane0/'
+# opt.datasets_folder = 'reg_tif'
+# opt.output_path = os.path.join(opt.datasets_path,'denoised_tif')
+# # model path
+# opt.pth_path = '/home/adamranson/data/srt_models'
+# opt.denoise_model = 'mixed_axon_soma_g8_202412022250'
+# opt.gpus = '0,1'
 
 # use isotropic patch size by default
 opt.patch_y = opt.patch_x  # the height of 3D patches (patch size in y)
@@ -73,8 +93,7 @@ model_list[:-1] = []
 # get stacks for processing
 im_folder = os.path.join(opt.datasets_path, opt.datasets_folder)
 
-img_list = list(os.walk(im_folder, topdown=False))[-1][-1]
-img_list.sort()
+img_list = list_supported_stack_files(im_folder)
 
         
 print('\033[1;31mStacks to be processed -----> \033[0m')
@@ -148,7 +167,15 @@ def test():
                 prev_time = time.time()
                 time_start = time.time()
                 denoise_img = np.zeros(noise_img.shape)
-                result_file_name = img_list[N].replace('.tif', '') + '_' + pth_name.replace('.pth','') + '_output.tif'
+                input_name = img_list[N]
+                input_stem, input_ext = os.path.splitext(input_name)
+                if opt.output_format == 'bin':
+                    if input_name in {'data.bin', 'data_chan2.bin'}:
+                        result_file_name = input_name
+                    else:
+                        result_file_name = input_stem + '.bin'
+                else:
+                    result_file_name = input_stem + '_' + pth_name.replace('.pth','') + '_output.tif'
                 result_name = os.path.join(output_path, result_file_name)
                 print(os.getcwd())
                 print(result_name)
@@ -173,10 +200,11 @@ def test():
                         time_left = datetime.timedelta(seconds=time_left_seconds)
                         prev_time = time.time()
                         ################################################################################################################
+                        
                         if iteration % 1 == 0:
                             time_end = time.time()
                             time_cost = time_end - time_start  # datetime.timedelta(seconds= (time_end - time_start))
-                            print(
+                            status = (
                                 '\r[Model %d/%d, %s] [Stack %d/%d, %s] [Patch %d/%d] [Time Cost: %.0d s] [ETA: %s s]     '
                                 % (
                                     pth_index + 1,
@@ -189,10 +217,14 @@ def test():
                                     len(testloader),
                                     time_cost,
                                     time_left_seconds
-                                ), end=' ')
+                                )
+                            )
+                            sys.stdout.write(status)
+                            sys.stdout.flush()
 
                         if (iteration + 1) % len(testloader) == 0:
-                            print('\n', end=' ')
+                            sys.stdout.write('\n')
+                            sys.stdout.flush()
                         ################################################################################################################
                         output_image = np.squeeze(fake_B.cpu().detach().numpy())
                         raw_image = np.squeeze(real_A.cpu().detach().numpy())
@@ -235,7 +267,16 @@ def test():
                     else:
                         output_img = output_img.astype('int32')
                             
-                    io.imsave(result_name, output_img, check_contrast=False)
+                    if opt.output_format == 'bin':
+                        if input_data_type == 'uint16':
+                            bin_dtype = np.uint16
+                        elif input_data_type == 'int16':
+                            bin_dtype = np.int16
+                        else:
+                            bin_dtype = np.int32
+                        output_img.astype(bin_dtype).tofile(result_name)
+                    else:
+                        io.imsave(result_name, output_img, check_contrast=False)
                     print("test result saved in:", result_name)
 
 
