@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import json
 import tifffile as tiff
 from skimage import io
 import random
@@ -20,7 +21,23 @@ def list_supported_stack_files(im_folder):
     tif_files = sorted([f for f in filenames if f.lower().endswith('.tif')])
     if tif_files:
         return tif_files
-    return sorted([f for f in filenames if f in {'data.bin', 'data_chan2.bin'}])
+    return sorted([f for f in filenames if f.lower().endswith('.bin')])
+
+
+def _load_bin_metadata(bin_path):
+    stem_json = os.path.splitext(bin_path)[0] + '.json'
+    name_json = bin_path + '.json'
+    for metadata_path in (stem_json, name_json):
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r', encoding='utf-8') as handle:
+                metadata = json.load(handle)
+            ly = int(metadata.get('Ly', metadata.get('ly', 0)))
+            lx = int(metadata.get('Lx', metadata.get('lx', 0)))
+            dtype = np.dtype(metadata.get('dtype', 'int16'))
+            if ly <= 0 or lx <= 0:
+                raise ValueError(f'Invalid frame size in metadata: {metadata_path}')
+            return ly, lx, dtype
+    return None
 
 
 def load_stack_file(im_dir):
@@ -29,21 +46,27 @@ def load_stack_file(im_dir):
         with tiff.TiffFile(im_dir) as tif:
             return np.stack([page.asarray() for page in tif.pages])
 
-    if os.path.basename(im_dir) not in {'data.bin', 'data_chan2.bin'}:
+    if not im_dir.lower().endswith('.bin'):
         raise ValueError(f'Unsupported stack file: {im_dir}')
 
     plane_dir = os.path.dirname(im_dir)
-    ops_path = os.path.join(plane_dir, 'ops.npy')
-    if not os.path.exists(ops_path):
-        raise FileNotFoundError(f'Missing ops.npy next to Suite2p binary: {ops_path}')
+    metadata = _load_bin_metadata(im_dir)
+    if metadata is None:
+        ops_path = os.path.join(plane_dir, 'ops.npy')
+        if not os.path.exists(ops_path):
+            raise FileNotFoundError(
+                f'Missing metadata JSON or ops.npy next to binary: {im_dir}'
+            )
+        ops = np.load(ops_path, allow_pickle=True).item()
+        ly = int(ops.get('Ly', ops.get('meanImg', np.empty((0, 0))).shape[0]))
+        lx = int(ops.get('Lx', ops.get('meanImg', np.empty((0, 0))).shape[1]))
+        dtype = np.dtype('int16')
+        if ly <= 0 or lx <= 0:
+            raise ValueError(f'Could not determine frame size from {ops_path}')
+    else:
+        ly, lx, dtype = metadata
 
-    ops = np.load(ops_path, allow_pickle=True).item()
-    ly = int(ops.get('Ly', ops.get('meanImg', np.empty((0, 0))).shape[0]))
-    lx = int(ops.get('Lx', ops.get('meanImg', np.empty((0, 0))).shape[1]))
-    if ly <= 0 or lx <= 0:
-        raise ValueError(f'Could not determine frame size from {ops_path}')
-
-    mm = np.memmap(im_dir, dtype=np.int16, mode='r')
+    mm = np.memmap(im_dir, dtype=dtype, mode='r')
     pixels_per_frame = ly * lx
     if mm.size % pixels_per_frame != 0:
         raise ValueError(
